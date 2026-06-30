@@ -8,6 +8,8 @@
 from vs.abstract_agent import AbstAgent
 from vs.constants import VS
 from map import Map
+import random
+import math
 
 
 ## Classe que define o Agente Rescuer com um plano fixo
@@ -107,7 +109,173 @@ class Rescuer(AbstAgent):
         for i in range(3):
             self.rescuers[i].do_rescue(self.map, clusters)
             
+
+    def vizinhos_validos(self, pos): #função que retorna os vizinhos válidos e seus custos para se mover, não era necessário, pois o código já tinha isso implementado mas eu não vi
+
+        vizinhos = []
+        vetor_custos = []
+        direcoes = [ (0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1) ]
+        for d in direcoes:
+            novo_x = pos[0] + d[0]
+            novo_y = pos[1] + d[1]
+            if self.map.in_map((novo_x, novo_y)):
+                vizinhos.append((novo_x, novo_y))
+                difficulty, vic_seq, next_actions_res = self.map.get((novo_x, novo_y)) #não tenho completa certeza disso
+            
+                if d[0] != 0 and d[1] != 0: # e nem disso pra ser sincero
+                    difficulty = difficulty * 1.5
+
+                vetor_custos.append(difficulty)    
+
+        return vizinhos, vetor_custos
+    
+    def octil_distance(self, start, goal): # a heuristica é a distância octil 
+        dx = abs(start[0] - goal[0])
+        dy = abs(start[1] - goal[1])
+        D = 1          
+        D2 = 1.5       
+        return D * (dx + dy) + (D2 - 2 * D) * min(dx, dy)
+
+    def aestrela(self, start, goal):    
+        vetor_caminho = []
+        #print(start)
+        heap = [(0, start)]
+        vetor_custo_parcial = {start: 0}
+        vetor_anteriores = {}
+
+        while heap:
+            melhor_i = 0
+            for i in range(1, len(heap)):
+                if heap[i][0] < heap[melhor_i][0]:
+                    melhor_i = i
+
+            custo_atual, atual = heap.pop(melhor_i)
+            if  atual == goal:
+                vetor_caminho = [atual]
+                while atual in vetor_anteriores:
+                    atual = vetor_anteriores[atual]
+                    vetor_caminho.append(atual)
+
+                vetor_caminho = vetor_caminho[::-1]
+                return vetor_custo_parcial[goal], vetor_caminho
+            
+            vizinhos_validos_lista, vetor_custos = self.vizinhos_validos(atual)
         
+                       
+            for i in range(len(vizinhos_validos_lista)):
+                vizinho = vizinhos_validos_lista[i]
+                custo_vizinho = vetor_custos[i]
+                custo_real = vetor_custo_parcial[atual] + custo_vizinho
+                
+            
+                if vizinho not in vetor_custo_parcial or custo_real < vetor_custo_parcial[vizinho]:
+                    vetor_custo_parcial[vizinho] = custo_real
+                    vetor_anteriores[vizinho] = atual
+                    custo_atual = custo_real + self.octil_distance(vizinho, goal)
+                    heap.append((custo_atual, vizinho))    
+
+        return None, []
+    
+    def __planner(self, victims_list):
+        vetor_caminhos = []
+        vetor_custos = []
+        i = 0
+        for victim in victims_list:
+            if i != 0:
+                vetor_custos_parcial, vetor_caminhos_parcial = self.aestrela((victims_list[i-1][0]), victim[0])
+            else:
+                vetor_custos_parcial, vetor_caminhos_parcial = self.aestrela((0, 0), victim[0])
+            vetor_caminhos.append(vetor_caminhos_parcial)
+            vetor_custos.append(vetor_custos_parcial)
+            i = i + 1
+        
+        vetor_custos_parcial, vetor_caminhos_parcial = self.aestrela(victim[0], (0, 0))
+        vetor_caminhos.append(vetor_caminhos_parcial)
+        vetor_custos.append(vetor_custos_parcial)
+        acumulador = 0
+        for custo in vetor_custos:
+            acumulador = acumulador + custo
+
+        acumulador = acumulador + (len(victims_list) * self.COST_FIRST_AID)
+
+        self.plan = []
+
+        primeira_pos = True
+        posicao_anterior = None
+        i = 0
+        
+        for caminho_parcial in vetor_caminhos:
+            for posicao in caminho_parcial:
+                if primeira_pos:
+                    posicao_anterior = posicao
+                    primeira_pos = False
+                    continue
+
+                if posicao == caminho_parcial[0]:
+                    posicao_anterior = posicao
+                    #print(self.plan[i-1])
+                    dx, dy, _ = self.plan[i-1]    #A forma pensada para alterar um dado na tupla, que nunca estava salvando aonde tinha sobreviventes
+                    self.plan[i-1] = (dx, dy, True)
+                    #print(self.plan[i-1])
+                    continue
+                
+                has_victim = False
+                dx = posicao[0] - posicao_anterior[0]
+                dy = posicao[1] - posicao_anterior[1]
+                self.plan.append((dx, dy, has_victim))
+                posicao_anterior = posicao
+                i = i + 1       
+
+        return acumulador
+
+        pass
+
+    def swap(self, list):
+        i = random.randint(0, len(list) - 1)
+        j = random.randint(0, len(list) - 1)
+        list[i], list[j] = list[j], list[i]
+        return list
+    
+    def simmulated_annealing(self, victims_list):
+        # print(victims_list)
+        # for v in victims_list:
+        #     if len(v) < 4:
+        #         print("Vitima:", v, "tamanho:", len(v))
+        victims_list.sort(key=lambda v: v[3], reverse=True) #ordena pela sobr
+        not_valid = True
+        while not_valid:
+            current = victims_list.copy()
+            best = current
+            best_E = self.__planner(best)
+            max_iterations = 500
+
+            for i in range(max_iterations):
+                T = 100 * 0.99**i #linear: 100 * (max_iterations - i) / max_iterations
+                next = current.copy()
+                next = self.swap(next)
+                current_E = self.__planner( current)
+                next_E = self.__planner(next)
+                delta = current_E - next_E
+                if delta > 0 or random.uniform(0, 1) < math.exp(delta/T):
+                    current = next
+                if current_E < best_E:
+                    best = current
+                    best_E = current_E
+
+            if best_E < self.TLIM:
+                not_valid = False
+            else:
+                print(f"{self.NAME} redoing simmulated annealing, best energy {best_E} exceeds time limit {self.TLIM}")
+                coeficiente = 1-self.TLIM/best_E 
+                for i in range(int(len(victims_list)*coeficiente) + 1):
+                    victims_list.pop() #remove a vitima com menor chance de sobrevivencia (a ultima da lista ordenada pela sobr)
+                                   #to fazendo isso mais pra suprir aquilo que o Tacla pediu de usar sobr ou tri, mas 
+                                   #talvez faria mais sentido tirar a vitima que está mais longe da base
+        
+
+        self.__planner(best)
+        return best
+
     def deliberate(self) -> bool:
         """ This is the choice of the next action. The simulator calls this
         method at each reasonning cycle if the agent is ACTIVE.
