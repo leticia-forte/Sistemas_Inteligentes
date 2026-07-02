@@ -58,8 +58,8 @@ class Rescuer(AbstAgent):
             
             df = pd.read_csv(dataset_train_path)
             
-            # Remove colunas que não são features
-            ignored_columns = ["gcs", "avpu"]
+            # CORREÇÃO: Força a remoção do 'id' no treinamento para evitar overfitting
+            ignored_columns = ["id", "gcs", "avpu"]
             df_clean = df.drop(columns=[col for col in ignored_columns if col in df.columns])
             
             X_train = df_clean.drop(columns=["tri", "sobr"])
@@ -70,8 +70,8 @@ class Rescuer(AbstAgent):
             self.clf_model.fit(X_train, y_train_clf)
             self.reg_model.fit(X_train, y_train_reg)
             
+            # Salva os nomes exatos das features usadas no treino para alinhar na inferência
             self.feature_names = X_train.columns.tolist()
-            # print(f"{self.NAME}: Modelos CART e Regressor treinados e embarcados.")
         except Exception as e:
             print(f"{self.NAME}: Erro ao treinar os modelos de ML. {e}")
 
@@ -130,65 +130,66 @@ class Rescuer(AbstAgent):
         self.set_state(VS.ACTIVE)
         self.map = map  
         
-        # print(f"{self.NAME}: Avaliando e classificando vítimas...")
         vitimas_avaliadas = []
         
-        colunas_sinais = ['idade','fc','fr','pas','spo2','temp','pr','sg','fx','queim','gcs','avpu','tri']
+        # CORREÇÃO: Adicionado o 'id' na primeira posição. Agora os 13 elementos batem com as colunas.
+        colunas_sinais = ['id', 'idade', 'fc', 'fr', 'pas', 'spo2', 'temp', 'pr', 'sg', 'fx', 'queim', 'gcs', 'tri']
         
         for victim_coord in cluster_atribuido:
             vital_signals = None
+            seq_vitima = -1 
+            
             for seq, data in self.victims.items():
                 if data[0] == victim_coord:
                     vital_signals = data[1]
+                    seq_vitima = seq
                     break
             
             if vital_signals is not None:
                 df_sinais = pd.DataFrame([vital_signals], columns=colunas_sinais)
                 
-                # Remove o que não é feature (incluindo o 'tri' que vem no array original)
-                df_features = df_sinais.drop(columns=[col for col in ['id', 'gcs', 'avpu', 'tri'] if col in df_sinais.columns])
+                # Remove colunas que o modelo não deve avaliar (incluindo o ID)
+                cols_to_drop = ['id', 'gcs', 'tri']
+                df_features = df_sinais.drop(columns=[col for col in cols_to_drop if col in df_sinais.columns])
+                
+                # Garante que a ordem das colunas da inferência esteja IDÊNTICA à do treinamento
+                df_features = df_features[self.feature_names]
                 
                 try:
-                    # ML em Ação: Prevendo Gravidade (CART) e Sobrevivência (Regressor)
                     gravidade = self.clf_model.predict(df_features)[0]
                     previsao_sobr = self.reg_model.predict(df_features)[0]
-                except Exception:
+                except Exception as e:
+                    print(f"Erro predição: {e}")
                     gravidade = 0
                     previsao_sobr = 0.0
-                
             else:
                 gravidade = 0 
                 previsao_sobr = 0.0
                 
             vitimas_avaliadas.append({
+                'id_vitima': seq_vitima, 
                 'coord': victim_coord,
-                'gravidade': gravidade, # Output do CART
-                'sobr': previsao_sobr,  # Output do Regressor
+                'gravidade': gravidade, 
+                'sobr': previsao_sobr,  
                 'sinais': vital_signals
             })
 
         # =====================================================================
         # --- SEQUENCIAMENTO (TÊMPERA SIMULADA) COM OS 2 MODELOS DE ML ---
         if vitimas_avaliadas:
-            
-            # Ordenação inicial gulosa usando a chave 'sobr'
             vitimas_avaliadas.sort(key=lambda v: v['sobr'])
             
             tamanho_cluster = len(vitimas_avaliadas)
             pesos_sobr = {}
             matriz_dist = {i: {} for i in range(tamanho_cluster)}
             
-            # Multiplicadores SUAVIZADOS para priorizar a ROTA (economia de TLIM)
-            # Ao invés de peso 10.0, usamos 1.2. O robô vai priorizar a distância!
             fator_triagem = {0: 1.0, 1: 1.1, 2: 1.2, 3: 0.1} 
             
             for i in range(tamanho_cluster):
                 v_i = vitimas_avaliadas[i]
                 
-                # Peso final não força deslocamentos absurdos, apenas desempata casos próximos
                 fator = fator_triagem.get(v_i['gravidade'], 1.0)
                 peso_final = 1.0 + ((1.0 - v_i['sobr']) * fator) 
-                
                 pesos_sobr[i] = peso_final 
                 
                 for j in range(tamanho_cluster):
@@ -208,11 +209,11 @@ class Rescuer(AbstAgent):
             sequencia_vitimas = []
         # ---------------------------------------------------------------------
 
-        # print(f"{self.NAME}: Iniciando trajeto de socorro A* para {len(sequencia_vitimas)} vítimas...")
         # PLANEJAMENTO DE TRAJETÓRIA COM A*
         current_pos = (0, 0) 
         self.plan = []
         self.plan_rtime = self.TLIM
+        vitimas_salvas_coords = [] 
         
         for victim_coord in sequencia_vitimas:
             path_to_vict = self.a_star(current_pos, victim_coord)
@@ -230,8 +231,8 @@ class Rescuer(AbstAgent):
                 
                 self.plan_rtime -= (ida_cost + first_aid_cost)
                 current_pos = victim_coord
+                vitimas_salvas_coords.append(victim_coord) 
             else:
-                print(f"{self.NAME}: Tempo insuficiente para salvar vítima em {victim_coord}. Abortando e retornando à base.")
                 break 
         
         if current_pos != (0, 0):
@@ -239,7 +240,49 @@ class Rescuer(AbstAgent):
             if path_to_base:
                 self._add_path_to_plan(current_pos, path_to_base, apply_first_aid_at_end=False)
                 
-        # print(f"{self.NAME}: Planejamento finalizado. Ações calculadas: {len(self.plan)}")
+        # =====================================================================
+        # --- EXTRATOR DE DADOS E EXPORTADOR DE CLUSTERS PARA ENTREGA ---
+        import os
+        import statistics
+
+        if vitimas_salvas_coords:
+            os.makedirs('clusters', exist_ok=True)
+            
+            agente_id = ''.join(filter(str.isdigit, self.NAME))
+            if not agente_id:
+                agente_id = self.NAME
+                
+            nome_arquivo = f"clusters/cluster_{agente_id}.txt"
+            
+            with open(nome_arquivo, "w") as f:
+                for coord in vitimas_salvas_coords:
+                    v_info = next(v for v in vitimas_avaliadas if v['coord'] == coord)
+                    f.write(f"{v_info['id_vitima']}\n") 
+            
+            contagem_triagem = {0: 0, 1: 0, 2: 0, 3: 0} 
+            valores_sobr = []
+            
+            vitimas_salvas_dados = [v for v in vitimas_avaliadas if v['coord'] in vitimas_salvas_coords]
+            
+            for v in vitimas_salvas_dados:
+                grav_real = int(v['sinais'][12]) if v['sinais'] else v['gravidade']
+                contagem_triagem[grav_real] = contagem_triagem.get(grav_real, 0) + 1
+                
+                sobr_real = float(v['sobr']) 
+                valores_sobr.append(sobr_real)
+                
+            media_sobr = statistics.mean(valores_sobr) if valores_sobr else 0.0
+            stdev_sobr = statistics.stdev(valores_sobr) if len(valores_sobr) > 1 else 0.0
+            custo_total_a_star = self.TLIM - self.plan_rtime
+            
+            print(f"\n--- DADOS DO RELATÓRIO (TABELA 1) : {self.NAME} ---")
+            print(f"Arquivo Exportado: {nome_arquivo}")
+            print(f"G(0): {contagem_triagem.get(0, 0)} | Y(1): {contagem_triagem.get(1, 0)} | R(2): {contagem_triagem.get(2, 0)} | B(3): {contagem_triagem.get(3, 0)}")
+            print(f"Total de Vítimas Salvas na Sequência: {len(vitimas_salvas_coords)}")
+            print(f"Custo Total Trajeto A*: {custo_total_a_star:.2f}")
+            print(f"Sobr Médio: {media_sobr:.4f} | Sobr Desvio Padrão: {stdev_sobr:.4f}")
+            print("-------------------------------------------------------\n")
+        # =====================================================================
 
     def a_star(self, start, goal):
         open_set = []
@@ -328,7 +371,7 @@ class Rescuer(AbstAgent):
         seqs = []
         for seq, (coord, vitals) in self.victims.items():
             x_rel, y_rel = coord
-            gcs = vitals[10]
+            gcs = vitals[11] # Atualizado o índice devido à inserção do ID
             tri = vitals[12]
             data.append([x_rel, y_rel, tri, gcs])
             seqs.append(seq)
@@ -364,6 +407,7 @@ class Rescuer(AbstAgent):
             rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
 
         for i in range(len(self.rescuers)):
+            self.rescuers[i].victims = self.victims 
             self.rescuers[i].do_rescue(self.map, atribuicoes[i])
             
         
@@ -380,7 +424,7 @@ class Rescuer(AbstAgent):
             if there_is_vict:
                 rescued = self.first_aid() 
                 if not rescued:
-                    print(f"{self.NAME}: Falha no plano - sem vítima em ({self.x}, {self.y})")
+                    pass
         else:
             print(f"{self.NAME}: Falha de colisão ou movimento em ({self.x}, {self.y})")
             
