@@ -1,9 +1,9 @@
 ##  RESCUER AGENT
 ### @Author: Tacla (UTFPR)
-### Modificado para a Tarefa 5: Integração Completa (ML, Clustering, Sequenciamento TS e A*)
+### Modificado para a Tarefa 5: Integração Completa (ML CART + Regressor, Clustering, TS e A*)
 
 import pandas as pd
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from pathlib import Path
@@ -38,40 +38,42 @@ class Rescuer(AbstAgent):
                 
         self.set_state(VS.IDLE)
         
-        # Inicializa e treina o modelo de Classificação (CART)
+        # Inicializa Modelos de Classificação e Regressão
         self.clf_model = DecisionTreeClassifier(
-            random_state=111,
-            criterion='gini',
-            max_depth=3,
-            min_samples_leaf=4,
-            min_samples_split=2,
-            class_weight='balanced'
+            random_state=111, criterion='gini', max_depth=3,
+            min_samples_leaf=4, min_samples_split=2, class_weight='balanced'
         )
-        self._train_classifier()
+        self.reg_model = DecisionTreeRegressor(random_state=111, max_depth=4)
+        
+        self._train_models()
 
     def set_rescuers(self, rescuers_lst):
         self.rescuers = rescuers_lst
         
-    def _train_classifier(self):
-        """ Treina o modelo internamente com os dados do arquivo CSV fornecido """
+    def _train_models(self):
+        """ Treina os modelos de Classificação (tri) e Regressão (sobr) internamente """
         try:
             base_path = Path(__file__).parent
             dataset_train_path = base_path / "datasets/vict/1000v/data.csv"
             
             df = pd.read_csv(dataset_train_path)
             
-            ignored_columns = ["gcs", "avpu", "sobr"]
-            cols_to_remove = [col for col in ignored_columns if col in df.columns]
-            df = df.drop(columns=cols_to_remove)
+            # Remove colunas que não são features
+            ignored_columns = ["gcs", "avpu"]
+            df_clean = df.drop(columns=[col for col in ignored_columns if col in df.columns])
             
-            X_train = df.drop(columns=["tri"])
-            y_train = df["tri"]
+            X_train = df_clean.drop(columns=["tri", "sobr"])
+            y_train_clf = df_clean["tri"]
+            y_train_reg = df_clean["sobr"]
             
-            self.clf_model.fit(X_train, y_train)
+            # Treinamento de ambos os modelos
+            self.clf_model.fit(X_train, y_train_clf)
+            self.reg_model.fit(X_train, y_train_reg)
+            
             self.feature_names = X_train.columns.tolist()
-            # print(f"{self.NAME}: Classificador CART treinado e embarcado.")
+            # print(f"{self.NAME}: Modelos CART e Regressor treinados e embarcados.")
         except Exception as e:
-            print(f"{self.NAME}: Erro ao treinar CART. {e}")
+            print(f"{self.NAME}: Erro ao treinar os modelos de ML. {e}")
 
     def calcula_custo_otimizado(self, sequencia, matriz_dist, pesos_sobr):
         """ Função de custo para a Têmpera Simulada """
@@ -131,7 +133,6 @@ class Rescuer(AbstAgent):
         # print(f"{self.NAME}: Avaliando e classificando vítimas...")
         vitimas_avaliadas = []
         
-        # Correção: Removido 'sobr', deixando apenas os 13 sinais reais lidos do simulador
         colunas_sinais = ['idade','fc','fr','pas','spo2','temp','pr','sg','fx','queim','gcs','avpu','tri']
         
         for victim_coord in cluster_atribuido:
@@ -142,21 +143,18 @@ class Rescuer(AbstAgent):
                     break
             
             if vital_signals is not None:
-                # Agora o Pandas processa corretamente 13 dados para 13 colunas
                 df_sinais = pd.DataFrame([vital_signals], columns=colunas_sinais)
-                df_features = df_sinais.drop(columns=[col for col in ['id', 'gcs', 'avpu'] if col in df_sinais.columns])
+                
+                # Remove o que não é feature (incluindo o 'tri' que vem no array original)
+                df_features = df_sinais.drop(columns=[col for col in ['id', 'gcs', 'avpu', 'tri'] if col in df_sinais.columns])
                 
                 try:
+                    # ML em Ação: Prevendo Gravidade (CART) e Sobrevivência (Regressor)
                     gravidade = self.clf_model.predict(df_features)[0]
+                    previsao_sobr = self.reg_model.predict(df_features)[0]
                 except Exception:
                     gravidade = 0
-                    
-                # =====================================================================
-                # --- INSIRA AQUI O SEU CÓDIGO DE REGRESSÃO ---
-                # Exemplo: previsao_sobr = self.regression_model.predict(df_features)[0]
-                # Por enquanto, usamos 0.5 como placeholder para evitar falhas no Sequenciamento
-                previsao_sobr = 0.5 
-                # =====================================================================
+                    previsao_sobr = 0.0
                 
             else:
                 gravidade = 0 
@@ -164,29 +162,34 @@ class Rescuer(AbstAgent):
                 
             vitimas_avaliadas.append({
                 'coord': victim_coord,
-                'gravidade': gravidade,
-                'sobr': previsao_sobr, # Novo campo salvo separadamente
+                'gravidade': gravidade, # Output do CART
+                'sobr': previsao_sobr,  # Output do Regressor
                 'sinais': vital_signals
             })
 
         # =====================================================================
-        # --- CÓDIGO DE SEQUENCIAMENTO (TÊMPERA SIMULADA) INTEGRADO ---
+        # --- SEQUENCIAMENTO (TÊMPERA SIMULADA) COM OS 2 MODELOS DE ML ---
         if vitimas_avaliadas:
-            # print(f"{self.NAME}: Sequenciando rota com Têmpera Simulada...")
             
-            # Ordenação inicial gulosa usando a nova chave 'sobr'
+            # Ordenação inicial gulosa usando a chave 'sobr'
             vitimas_avaliadas.sort(key=lambda v: v['sobr'])
             
             tamanho_cluster = len(vitimas_avaliadas)
             pesos_sobr = {}
             matriz_dist = {i: {} for i in range(tamanho_cluster)}
             
+            # Multiplicadores SUAVIZADOS para priorizar a ROTA (economia de TLIM)
+            # Ao invés de peso 10.0, usamos 1.2. O robô vai priorizar a distância!
+            fator_triagem = {0: 1.0, 1: 1.1, 2: 1.2, 3: 0.1} 
+            
             for i in range(tamanho_cluster):
                 v_i = vitimas_avaliadas[i]
                 
-                # Acessa diretamente a chave 'sobr' em vez de buscar no índice [13] inexistente
-                sobr = v_i['sobr'] 
-                pesos_sobr[i] = 1.0 - sobr 
+                # Peso final não força deslocamentos absurdos, apenas desempata casos próximos
+                fator = fator_triagem.get(v_i['gravidade'], 1.0)
+                peso_final = 1.0 + ((1.0 - v_i['sobr']) * fator) 
+                
+                pesos_sobr[i] = peso_final 
                 
                 for j in range(tamanho_cluster):
                     if i == j:
@@ -216,7 +219,6 @@ class Rescuer(AbstAgent):
             path_to_base = self.a_star(victim_coord, (0, 0)) 
             
             if not path_to_vict or not path_to_base:
-                # print(f"{self.NAME}: Destino {victim_coord} ou retorno inacessível. Ignorando.")
                 continue
                 
             ida_cost = self._calc_path_cost(current_pos, path_to_vict)
@@ -315,21 +317,13 @@ class Rescuer(AbstAgent):
             if not self.map.in_map(coord):
                 difficulty, victim_seq, actions_res = cell_data
                 self.map.add(coord, difficulty, victim_seq, actions_res)
-    
-        # print(f"{self.NAME}: Map recebido de {exp_name}")
 
         self.victims.update(victims)
         self.explorers_remaining.discard(exp_name)
 
         if self.explorers_remaining:
             return
-        
-        # self.map.draw()
 
-        # =====================================================================
-        # --- CÓDIGO DE CLUSTERING E ATRIBUIÇÃO AOS SOCORRISTAS ---
-        # print(f"{self.NAME}: Master executando DBSCAN (eps=0.70, min_samples=6)...")
-        
         data = []
         seqs = []
         for seq, (coord, vitals) in self.victims.items():
@@ -368,9 +362,6 @@ class Rescuer(AbstAgent):
         for coord in noise_coords:
             atribuicoes[rescuer_idx].append(coord)
             rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
-            
-        # print(f"{self.NAME}: Atribuição finalizada. Disparando socorristas...")
-        # ---------------------------------------------------------------------
 
         for i in range(len(self.rescuers)):
             self.rescuers[i].do_rescue(self.map, atribuicoes[i])
@@ -378,7 +369,6 @@ class Rescuer(AbstAgent):
         
     def deliberate(self) -> bool:
         if self.plan == []:  
-        #    print(f"{self.NAME} retornou à base. Ações esgotadas.")
            return False
 
         dx, dy, there_is_vict = self.plan.pop(0)
@@ -389,10 +379,7 @@ class Rescuer(AbstAgent):
             self.y += dy
             if there_is_vict:
                 rescued = self.first_aid() 
-                if rescued:
-                    # print(f"{self.NAME}: Vítima socorrida em ({self.x}, {self.y})")
-                    pass
-                else:
+                if not rescued:
                     print(f"{self.NAME}: Falha no plano - sem vítima em ({self.x}, {self.y})")
         else:
             print(f"{self.NAME}: Falha de colisão ou movimento em ({self.x}, {self.y})")
