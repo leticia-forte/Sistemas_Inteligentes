@@ -56,7 +56,7 @@ class Rescuer(AbstAgent):
         """ Treina o modelo internamente com os dados do arquivo CSV fornecido """
         try:
             base_path = Path(__file__).parent
-            dataset_train_path = base_path / "../datasets/vict/10v/data.csv"
+            dataset_train_path = base_path / "datasets/vict/1000v/data.csv"
             
             df = pd.read_csv(dataset_train_path)
             
@@ -69,7 +69,7 @@ class Rescuer(AbstAgent):
             
             self.clf_model.fit(X_train, y_train)
             self.feature_names = X_train.columns.tolist()
-            print(f"{self.NAME}: Classificador CART treinado e embarcado.")
+            # print(f"{self.NAME}: Classificador CART treinado e embarcado.")
         except Exception as e:
             print(f"{self.NAME}: Erro ao treinar CART. {e}")
 
@@ -128,10 +128,11 @@ class Rescuer(AbstAgent):
         self.set_state(VS.ACTIVE)
         self.map = map  
         
-        print(f"{self.NAME}: Avaliando e classificando vítimas...")
+        # print(f"{self.NAME}: Avaliando e classificando vítimas...")
         vitimas_avaliadas = []
         
-        colunas_sinais = ['idade','fc','fr','pas','spo2','temp','pr','sg','fx','queim','gcs','avpu','tri','sobr']
+        # Correção: Removido 'sobr', deixando apenas os 13 sinais reais lidos do simulador
+        colunas_sinais = ['idade','fc','fr','pas','spo2','temp','pr','sg','fx','queim','gcs','avpu','tri']
         
         for victim_coord in cluster_atribuido:
             vital_signals = None
@@ -141,6 +142,7 @@ class Rescuer(AbstAgent):
                     break
             
             if vital_signals is not None:
+                # Agora o Pandas processa corretamente 13 dados para 13 colunas
                 df_sinais = pd.DataFrame([vital_signals], columns=colunas_sinais)
                 df_features = df_sinais.drop(columns=[col for col in ['id', 'gcs', 'avpu'] if col in df_sinais.columns])
                 
@@ -148,22 +150,32 @@ class Rescuer(AbstAgent):
                     gravidade = self.clf_model.predict(df_features)[0]
                 except Exception:
                     gravidade = 0
+                    
+                # =====================================================================
+                # --- INSIRA AQUI O SEU CÓDIGO DE REGRESSÃO ---
+                # Exemplo: previsao_sobr = self.regression_model.predict(df_features)[0]
+                # Por enquanto, usamos 0.5 como placeholder para evitar falhas no Sequenciamento
+                previsao_sobr = 0.5 
+                # =====================================================================
+                
             else:
                 gravidade = 0 
+                previsao_sobr = 0.0
                 
             vitimas_avaliadas.append({
                 'coord': victim_coord,
                 'gravidade': gravidade,
+                'sobr': previsao_sobr, # Novo campo salvo separadamente
                 'sinais': vital_signals
             })
 
         # =====================================================================
         # --- CÓDIGO DE SEQUENCIAMENTO (TÊMPERA SIMULADA) INTEGRADO ---
         if vitimas_avaliadas:
-            print(f"{self.NAME}: Sequenciando rota com Têmpera Simulada...")
+            # print(f"{self.NAME}: Sequenciando rota com Têmpera Simulada...")
             
-            # Ordenação inicial gulosa pelo 'sobr' (índice 13)
-            vitimas_avaliadas.sort(key=lambda v: v['sinais'][13] if v['sinais'] else 1.0)
+            # Ordenação inicial gulosa usando a nova chave 'sobr'
+            vitimas_avaliadas.sort(key=lambda v: v['sobr'])
             
             tamanho_cluster = len(vitimas_avaliadas)
             pesos_sobr = {}
@@ -171,7 +183,9 @@ class Rescuer(AbstAgent):
             
             for i in range(tamanho_cluster):
                 v_i = vitimas_avaliadas[i]
-                sobr = v_i['sinais'][13] if v_i['sinais'] else 0.5
+                
+                # Acessa diretamente a chave 'sobr' em vez de buscar no índice [13] inexistente
+                sobr = v_i['sobr'] 
                 pesos_sobr[i] = 1.0 - sobr 
                 
                 for j in range(tamanho_cluster):
@@ -181,19 +195,17 @@ class Rescuer(AbstAgent):
                         v_j = vitimas_avaliadas[j]
                         x1, y1 = v_i['coord']
                         x2, y2 = v_j['coord']
-                        # Distância Euclidiana base
                         matriz_dist[i][j] = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
             
             sequencia_inicial = list(range(tamanho_cluster))
             sequencia_otimizada = self.tempera_simulada(sequencia_inicial, matriz_dist, pesos_sobr)
             
-            # Traduz a sequência de índices de volta para coordenadas
             sequencia_vitimas = [vitimas_avaliadas[idx]['coord'] for idx in sequencia_otimizada]
         else:
             sequencia_vitimas = []
         # ---------------------------------------------------------------------
 
-        print(f"{self.NAME}: Iniciando trajeto de socorro A* para {len(sequencia_vitimas)} vítimas...")
+        # print(f"{self.NAME}: Iniciando trajeto de socorro A* para {len(sequencia_vitimas)} vítimas...")
         # PLANEJAMENTO DE TRAJETÓRIA COM A*
         current_pos = (0, 0) 
         self.plan = []
@@ -204,7 +216,7 @@ class Rescuer(AbstAgent):
             path_to_base = self.a_star(victim_coord, (0, 0)) 
             
             if not path_to_vict or not path_to_base:
-                print(f"{self.NAME}: Destino {victim_coord} ou retorno inacessível. Ignorando.")
+                # print(f"{self.NAME}: Destino {victim_coord} ou retorno inacessível. Ignorando.")
                 continue
                 
             ida_cost = self._calc_path_cost(current_pos, path_to_vict)
@@ -225,7 +237,7 @@ class Rescuer(AbstAgent):
             if path_to_base:
                 self._add_path_to_plan(current_pos, path_to_base, apply_first_aid_at_end=False)
                 
-        print(f"{self.NAME}: Planejamento finalizado. Ações calculadas: {len(self.plan)}")
+        # print(f"{self.NAME}: Planejamento finalizado. Ações calculadas: {len(self.plan)}")
 
     def a_star(self, start, goal):
         open_set = []
@@ -304,7 +316,7 @@ class Rescuer(AbstAgent):
                 difficulty, victim_seq, actions_res = cell_data
                 self.map.add(coord, difficulty, victim_seq, actions_res)
     
-        print(f"{self.NAME}: Map recebido de {exp_name}")
+        # print(f"{self.NAME}: Map recebido de {exp_name}")
 
         self.victims.update(victims)
         self.explorers_remaining.discard(exp_name)
@@ -312,11 +324,11 @@ class Rescuer(AbstAgent):
         if self.explorers_remaining:
             return
         
-        self.map.draw()
+        # self.map.draw()
 
         # =====================================================================
         # --- CÓDIGO DE CLUSTERING E ATRIBUIÇÃO AOS SOCORRISTAS ---
-        print(f"{self.NAME}: Master executando DBSCAN (eps=0.70, min_samples=6)...")
+        # print(f"{self.NAME}: Master executando DBSCAN (eps=0.70, min_samples=6)...")
         
         data = []
         seqs = []
@@ -357,7 +369,7 @@ class Rescuer(AbstAgent):
             atribuicoes[rescuer_idx].append(coord)
             rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
             
-        print(f"{self.NAME}: Atribuição finalizada. Disparando socorristas...")
+        # print(f"{self.NAME}: Atribuição finalizada. Disparando socorristas...")
         # ---------------------------------------------------------------------
 
         for i in range(len(self.rescuers)):
@@ -366,7 +378,7 @@ class Rescuer(AbstAgent):
         
     def deliberate(self) -> bool:
         if self.plan == []:  
-           print(f"{self.NAME} retornou à base. Ações esgotadas.")
+        #    print(f"{self.NAME} retornou à base. Ações esgotadas.")
            return False
 
         dx, dy, there_is_vict = self.plan.pop(0)
@@ -378,7 +390,8 @@ class Rescuer(AbstAgent):
             if there_is_vict:
                 rescued = self.first_aid() 
                 if rescued:
-                    print(f"{self.NAME}: Vítima socorrida em ({self.x}, {self.y})")
+                    # print(f"{self.NAME}: Vítima socorrida em ({self.x}, {self.y})")
+                    pass
                 else:
                     print(f"{self.NAME}: Falha no plano - sem vítima em ({self.x}, {self.y})")
         else:
