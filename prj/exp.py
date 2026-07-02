@@ -5,7 +5,6 @@
 # 3. Inércia Direcional
 # 4. Viés de Setor
 
-import random
 from vs.abstract_agent import AbstAgent
 from vs.constants import VS
 from map import Map
@@ -195,7 +194,7 @@ class Explorer(AbstAgent):
 
         result = self.walk(dx, dy)
         if result == VS.BUMPED:
-            print(f"{self.NAME}: when coming back bumped at ({self.x+dx}, {self.y+dy}) , rtime: {self.get_rtime()}")
+            # print(f"{self.NAME}: when coming back bumped at ({self.x+dx}, {self.y+dy}) , rtime: {self.get_rtime()}")
             return
             
         if result == VS.EXECUTED:
@@ -204,7 +203,7 @@ class Explorer(AbstAgent):
         
     def deliberate(self) -> bool:
         if self.walk_stack.is_empty() and not self.get_unvisited_neighbors():
-            print(f"{self.NAME}: rtime {self.get_rtime()}, FULL EXPLORATION, invoking the MASTER rescuer")
+            # print(f"{self.NAME}: rtime {self.get_rtime()}, FULL EXPLORATION, invoking the MASTER rescuer")
             self.resc.merge_maps(self.NAME, self.map, self.victims)
             return False
 
@@ -215,7 +214,7 @@ class Explorer(AbstAgent):
             return True
 
         if self.walk_stack.is_empty():
-            print(f"{self.NAME}: rtime {self.get_rtime()}, invoking the MASTER rescuer")
+            # print(f"{self.NAME}: rtime {self.get_rtime()}, invoking the MASTER rescuer")
             self.resc.merge_maps(self.NAME, self.map, self.victims)
             return False
 
