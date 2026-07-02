@@ -1,9 +1,11 @@
 ##  RESCUER AGENT
 ### @Author: Tacla (UTFPR)
-### Modificado para a Tarefa 5: Trajetória de Socorro (A*) e Integração de ML
+### Modificado para a Tarefa 5: Trajetória de Socorro (A*), ML e Clustering
 
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
 from pathlib import Path
 import warnings
 from sklearn.exceptions import ConvergenceWarning
@@ -34,7 +36,6 @@ class Rescuer(AbstAgent):
                 
         self.set_state(VS.IDLE)
         
-        # =====================================================================
         # Inicializa e treina o modelo de Classificação (CART)
         self.clf_model = DecisionTreeClassifier(
             random_state=111,
@@ -45,7 +46,6 @@ class Rescuer(AbstAgent):
             class_weight='balanced'
         )
         self._train_classifier()
-        # =====================================================================
 
     def set_rescuers(self, rescuers_lst):
         self.rescuers = rescuers_lst
@@ -58,7 +58,6 @@ class Rescuer(AbstAgent):
             
             df = pd.read_csv(dataset_train_path)
             
-            # Colunas a serem removidas conforme as configurações do seu código
             ignored_columns = ["gcs", "avpu", "sobr"]
             cols_to_remove = [col for col in ignored_columns if col in df.columns]
             df = df.drop(columns=cols_to_remove)
@@ -80,30 +79,24 @@ class Rescuer(AbstAgent):
 
         # =====================================================================
         # --- CÓDIGO DE CLASSIFICAÇÃO INTEGRADO ---
-        print(f"{self.NAME}: Classificando a gravidade das vítimas do cluster...")
+        print(f"{self.NAME}: Classificando a gravidade das vítimas do cluster atribuído...")
         vitimas_avaliadas = []
         
-        # Nomes das colunas padrão que os sinais vitais retornam no VictimSim
         colunas_sinais = ['idade','fc','fr','pas','spo2','temp','pr','sg','fx','queim','gcs','avpu','tri','sobr']
         
         for victim_coord in cluster_atribuido:
             vital_signals = None
             
-            # Localiza os sinais vitais da vítima no dicionário base
             for seq, data in self.victims.items():
                 if data[0] == victim_coord:
                     vital_signals = data[1]
                     break
             
             if vital_signals is not None:
-                # Converte para DataFrame usando as features que o CART espera
                 df_sinais = pd.DataFrame([vital_signals], columns=colunas_sinais)
-                
-                # Dropa colunas que não participam da predição e garante a ordem
                 df_features = df_sinais.drop(columns=[col for col in ['id', 'gcs', 'avpu'] if col in df_sinais.columns])
                 
                 try:
-                    # Realiza a predição da gravidade (tri)
                     gravidade = self.clf_model.predict(df_features)[0]
                 except Exception as e:
                     print(f"{self.NAME}: Erro na predição: {e}. Assumindo gravidade 0.")
@@ -249,19 +242,59 @@ class Rescuer(AbstAgent):
         self.map.draw()
 
         # =====================================================================
-        # --- INSIRA AQUI O SEU CÓDIGO DE CLUSTERING ---
+        # --- CÓDIGO DE CLUSTERING E ATRIBUIÇÃO AOS SOCORRISTAS ---
+        print(f"{self.NAME}: Executando DBSCAN (eps=0.70, min_samples=6)...")
         
-        clusters = [] # Temporário
+        data = []
+        seqs = []
+        # Extrai features: x_rel, y_rel, tri, gcs (índices 12 e 10 de vital_signals)
+        for seq, (coord, vitals) in self.victims.items():
+            x_rel, y_rel = coord
+            gcs = vitals[10]
+            tri = vitals[12]
+            data.append([x_rel, y_rel, tri, gcs])
+            seqs.append(seq)
+            
+        df_cluster = pd.DataFrame(data, columns=['x_rel', 'y_rel', 'tri', 'gcs'])
         
+        scaler = StandardScaler()
+        normalized_data = scaler.fit_transform(df_cluster)
+        
+        dbscan = DBSCAN(eps=0.70, min_samples=6)
+        df_cluster['cluster'] = dbscan.fit_predict(normalized_data)
+        df_cluster['coord'] = [self.victims[s][0] for s in seqs]
+        
+        # Ordena clusters pela média de GCS para criar prioridade
+        valid_clusters = [c for c in df_cluster['cluster'].unique() if c != -1]
+        cluster_priorities = []
+        for c_id in valid_clusters:
+            mean_gcs = df_cluster[df_cluster['cluster'] == c_id]['gcs'].mean()
+            cluster_priorities.append((c_id, mean_gcs))
+            
+        # Menor GCS = Maior Prioridade
+        cluster_priorities.sort(key=lambda x: x[1]) 
+        
+        # Atribuição: Round-Robin baseada na prioridade do cluster
+        atribuicoes = [[] for _ in range(len(self.rescuers))]
+        rescuer_idx = 0
+        
+        for priority_index, (c_id, mean_gcs) in enumerate(cluster_priorities):
+            coords = df_cluster[df_cluster['cluster'] == c_id]['coord'].tolist()
+            atribuicoes[rescuer_idx].extend(coords)
+            rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
+            
+        # Trata as vítimas rotuladas como ruído (-1), distribuindo-as
+        noise_coords = df_cluster[df_cluster['cluster'] == -1]['coord'].tolist()
+        for coord in noise_coords:
+            atribuicoes[rescuer_idx].append(coord)
+            rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
+            
+        print(f"{self.NAME}: Clustering finalizado. {len(valid_clusters)} clusters válidos encontrados + {len(noise_coords)} ruídos.")
         # ---------------------------------------------------------------------
 
-        # =====================================================================
-        # --- INSIRA AQUI O SEU CÓDIGO DE ATRIBUIÇÃO AOS SOCORRISTAS ---
-        
-        atribuicoes = [[], [], []] # Temporário
-        
-        # ---------------------------------------------------------------------
-
+        #####################
+        ### SEND CLUSTERS ###
+        #####################
         for i in range(len(self.rescuers)):
             self.rescuers[i].do_rescue(self.map, atribuicoes[i])
             
