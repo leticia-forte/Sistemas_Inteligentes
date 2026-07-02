@@ -1,6 +1,6 @@
 ##  RESCUER AGENT
 ### @Author: Tacla (UTFPR)
-### Modificado para a Tarefa 5: Trajetória de Socorro (A*), ML e Clustering
+### Modificado para a Tarefa 5: Integração Completa (ML, Clustering, Sequenciamento TS e A*)
 
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier
@@ -14,6 +14,8 @@ from vs.abstract_agent import AbstAgent
 from vs.constants import VS
 from map import Map
 import heapq 
+import random
+import math
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
@@ -67,26 +69,72 @@ class Rescuer(AbstAgent):
             
             self.clf_model.fit(X_train, y_train)
             self.feature_names = X_train.columns.tolist()
-            print(f"{self.NAME}: Classificador CART treinado e embarcado com sucesso.")
+            print(f"{self.NAME}: Classificador CART treinado e embarcado.")
         except Exception as e:
-            print(f"{self.NAME}: Erro ao treinar classificador CART. Verifique o caminho. {e}")
+            print(f"{self.NAME}: Erro ao treinar CART. {e}")
+
+    def calcula_custo_otimizado(self, sequencia, matriz_dist, pesos_sobr):
+        """ Função de custo para a Têmpera Simulada """
+        custo_total = 0.0
+        distancia_acumulada = 0.0
+        
+        for i in range(len(sequencia)):
+            id_atual = sequencia[i]
+            if i > 0:
+                id_anterior = sequencia[i-1]
+                distancia_acumulada += matriz_dist[id_anterior][id_atual]
+                
+            custo_total += (distancia_acumulada * pesos_sobr[id_atual])
+            
+        return custo_total
+
+    def tempera_simulada(self, sequencia_inicial, matriz_dist, pesos_sobr, temp_inicial=10000, resfriamento=0.9999, temp_final=0.1):
+        """ Algoritmo de sequenciamento heurístico """
+        sequencia_atual = sequencia_inicial.copy()
+        custo_atual = self.calcula_custo_otimizado(sequencia_atual, matriz_dist, pesos_sobr)
+        
+        melhor_sequencia = sequencia_atual.copy()
+        melhor_custo = custo_atual
+        
+        T = temp_inicial
+        iteracoes = 0
+        tamanho = len(sequencia_atual)
+        
+        if tamanho <= 1:
+            return melhor_sequencia
+            
+        while T > temp_final:
+            i, j = random.sample(range(tamanho), 2)
+            vizinho = sequencia_atual.copy()
+            vizinho[i], vizinho[j] = vizinho[j], vizinho[i]
+            
+            custo_vizinho = self.calcula_custo_otimizado(vizinho, matriz_dist, pesos_sobr)
+            delta = custo_vizinho - custo_atual
+            
+            if delta < 0 or random.random() < math.exp(-delta / T):
+                sequencia_atual = vizinho
+                custo_atual = custo_vizinho
+                
+                if custo_atual < melhor_custo:
+                    melhor_custo = custo_atual
+                    melhor_sequencia = sequencia_atual.copy()
+                    
+            T *= resfriamento
+            iteracoes += 1
+            
+        return melhor_sequencia
 
     def do_rescue(self, map, cluster_atribuido):
         self.set_state(VS.ACTIVE)
         self.map = map  
         
-        print(f"{self.NAME}: Planejando socorro via A*...")
-
-        # =====================================================================
-        # --- CÓDIGO DE CLASSIFICAÇÃO INTEGRADO ---
-        print(f"{self.NAME}: Classificando a gravidade das vítimas do cluster atribuído...")
+        print(f"{self.NAME}: Avaliando e classificando vítimas...")
         vitimas_avaliadas = []
         
         colunas_sinais = ['idade','fc','fr','pas','spo2','temp','pr','sg','fx','queim','gcs','avpu','tri','sobr']
         
         for victim_coord in cluster_atribuido:
             vital_signals = None
-            
             for seq, data in self.victims.items():
                 if data[0] == victim_coord:
                     vital_signals = data[1]
@@ -98,8 +146,7 @@ class Rescuer(AbstAgent):
                 
                 try:
                     gravidade = self.clf_model.predict(df_features)[0]
-                except Exception as e:
-                    print(f"{self.NAME}: Erro na predição: {e}. Assumindo gravidade 0.")
+                except Exception:
                     gravidade = 0
             else:
                 gravidade = 0 
@@ -109,17 +156,44 @@ class Rescuer(AbstAgent):
                 'gravidade': gravidade,
                 'sinais': vital_signals
             })
-        # ---------------------------------------------------------------------
 
         # =====================================================================
-        # --- INSIRA AQUI O SEU CÓDIGO DE SEQUENCIAMENTO ---
-        # Utilize a lista dicionário 'vitimas_avaliadas' recém-criada (que possui a 'gravidade')
-        # para ordenar sua fila.
-        
-        sequencia_vitimas = [v['coord'] for v in vitimas_avaliadas] # Substitua pela ordenação real
-        
+        # --- CÓDIGO DE SEQUENCIAMENTO (TÊMPERA SIMULADA) INTEGRADO ---
+        if vitimas_avaliadas:
+            print(f"{self.NAME}: Sequenciando rota com Têmpera Simulada...")
+            
+            # Ordenação inicial gulosa pelo 'sobr' (índice 13)
+            vitimas_avaliadas.sort(key=lambda v: v['sinais'][13] if v['sinais'] else 1.0)
+            
+            tamanho_cluster = len(vitimas_avaliadas)
+            pesos_sobr = {}
+            matriz_dist = {i: {} for i in range(tamanho_cluster)}
+            
+            for i in range(tamanho_cluster):
+                v_i = vitimas_avaliadas[i]
+                sobr = v_i['sinais'][13] if v_i['sinais'] else 0.5
+                pesos_sobr[i] = 1.0 - sobr 
+                
+                for j in range(tamanho_cluster):
+                    if i == j:
+                        matriz_dist[i][j] = 0.0
+                    else:
+                        v_j = vitimas_avaliadas[j]
+                        x1, y1 = v_i['coord']
+                        x2, y2 = v_j['coord']
+                        # Distância Euclidiana base
+                        matriz_dist[i][j] = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            
+            sequencia_inicial = list(range(tamanho_cluster))
+            sequencia_otimizada = self.tempera_simulada(sequencia_inicial, matriz_dist, pesos_sobr)
+            
+            # Traduz a sequência de índices de volta para coordenadas
+            sequencia_vitimas = [vitimas_avaliadas[idx]['coord'] for idx in sequencia_otimizada]
+        else:
+            sequencia_vitimas = []
         # ---------------------------------------------------------------------
 
+        print(f"{self.NAME}: Iniciando trajeto de socorro A* para {len(sequencia_vitimas)} vítimas...")
         # PLANEJAMENTO DE TRAJETÓRIA COM A*
         current_pos = (0, 0) 
         self.plan = []
@@ -143,7 +217,7 @@ class Rescuer(AbstAgent):
                 self.plan_rtime -= (ida_cost + first_aid_cost)
                 current_pos = victim_coord
             else:
-                print(f"{self.NAME}: Tempo insuficiente para salvar vítima em {victim_coord}. Retornando à base.")
+                print(f"{self.NAME}: Tempo insuficiente para salvar vítima em {victim_coord}. Abortando e retornando à base.")
                 break 
         
         if current_pos != (0, 0):
@@ -151,7 +225,7 @@ class Rescuer(AbstAgent):
             if path_to_base:
                 self._add_path_to_plan(current_pos, path_to_base, apply_first_aid_at_end=False)
                 
-        print(f"{self.NAME}: Planejamento finalizado. Ações planejadas: {len(self.plan)}")
+        print(f"{self.NAME}: Planejamento finalizado. Ações calculadas: {len(self.plan)}")
 
     def a_star(self, start, goal):
         open_set = []
@@ -230,24 +304,22 @@ class Rescuer(AbstAgent):
                 difficulty, victim_seq, actions_res = cell_data
                 self.map.add(coord, difficulty, victim_seq, actions_res)
     
-        print(f"{self.NAME}: Map received from explorer {exp_name}")
+        print(f"{self.NAME}: Map recebido de {exp_name}")
 
         self.victims.update(victims)
         self.explorers_remaining.discard(exp_name)
 
         if self.explorers_remaining:
-            print(f"{self.NAME}: Waiting for remaining explorers... {self.explorers_remaining}")
             return
         
         self.map.draw()
 
         # =====================================================================
         # --- CÓDIGO DE CLUSTERING E ATRIBUIÇÃO AOS SOCORRISTAS ---
-        print(f"{self.NAME}: Executando DBSCAN (eps=0.70, min_samples=6)...")
+        print(f"{self.NAME}: Master executando DBSCAN (eps=0.70, min_samples=6)...")
         
         data = []
         seqs = []
-        # Extrai features: x_rel, y_rel, tri, gcs (índices 12 e 10 de vital_signals)
         for seq, (coord, vitals) in self.victims.items():
             x_rel, y_rel = coord
             gcs = vitals[10]
@@ -264,17 +336,14 @@ class Rescuer(AbstAgent):
         df_cluster['cluster'] = dbscan.fit_predict(normalized_data)
         df_cluster['coord'] = [self.victims[s][0] for s in seqs]
         
-        # Ordena clusters pela média de GCS para criar prioridade
         valid_clusters = [c for c in df_cluster['cluster'].unique() if c != -1]
         cluster_priorities = []
         for c_id in valid_clusters:
             mean_gcs = df_cluster[df_cluster['cluster'] == c_id]['gcs'].mean()
             cluster_priorities.append((c_id, mean_gcs))
             
-        # Menor GCS = Maior Prioridade
         cluster_priorities.sort(key=lambda x: x[1]) 
         
-        # Atribuição: Round-Robin baseada na prioridade do cluster
         atribuicoes = [[] for _ in range(len(self.rescuers))]
         rescuer_idx = 0
         
@@ -283,25 +352,21 @@ class Rescuer(AbstAgent):
             atribuicoes[rescuer_idx].extend(coords)
             rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
             
-        # Trata as vítimas rotuladas como ruído (-1), distribuindo-as
         noise_coords = df_cluster[df_cluster['cluster'] == -1]['coord'].tolist()
         for coord in noise_coords:
             atribuicoes[rescuer_idx].append(coord)
             rescuer_idx = (rescuer_idx + 1) % len(self.rescuers)
             
-        print(f"{self.NAME}: Clustering finalizado. {len(valid_clusters)} clusters válidos encontrados + {len(noise_coords)} ruídos.")
+        print(f"{self.NAME}: Atribuição finalizada. Disparando socorristas...")
         # ---------------------------------------------------------------------
 
-        #####################
-        ### SEND CLUSTERS ###
-        #####################
         for i in range(len(self.rescuers)):
             self.rescuers[i].do_rescue(self.map, atribuicoes[i])
             
         
     def deliberate(self) -> bool:
         if self.plan == []:  
-           print(f"{self.NAME} has finished the plan")
+           print(f"{self.NAME} retornou à base. Ações esgotadas.")
            return False
 
         dx, dy, there_is_vict = self.plan.pop(0)
@@ -313,10 +378,10 @@ class Rescuer(AbstAgent):
             if there_is_vict:
                 rescued = self.first_aid() 
                 if rescued:
-                    print(f"{self.NAME} Victim rescued at ({self.x}, {self.y})")
+                    print(f"{self.NAME}: Vítima socorrida em ({self.x}, {self.y})")
                 else:
-                    print(f"{self.NAME} Plan fail - victim not found at ({self.x}, {self.y})")
+                    print(f"{self.NAME}: Falha no plano - sem vítima em ({self.x}, {self.y})")
         else:
-            print(f"{self.NAME} Plan fail - walk error - agent at ({self.x}, {self.y})")
+            print(f"{self.NAME}: Falha de colisão ou movimento em ({self.x}, {self.y})")
             
         return True
